@@ -1,0 +1,15 @@
+{
+  "name": "cursor-receipts-downloader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cursorの請求書(invoice)と領収書(receipt)を毎月自動DLする",
+  "type": "commonjs",
+  "scripts": {
+    "login": "node cli.js login",
+    "download": "node cli.js download",
+    "download:headed": "node cli.js download --headed"
+  },
+  "dependencies": {
+    "playwright-core": "^1.48.0"
+  }
+}
