@@ -43,8 +43,8 @@ async function snap(page, name) {
 
 async function saveDownload(download, label) {
   ensureDir(DOWNLOAD_DIR);
-  const suggested = download.suggestedFilename() || `${label}.pdf`;
-  const dest = path.join(DOWNLOAD_DIR, `cursor_${label}_${ts()}_${suggested}`);
+  const filename = download.suggestedFilename() || `${label}.pdf`;
+  const dest = path.join(DOWNLOAD_DIR, filename);
   await download.saveAs(dest);
   log(`saved: ${dest}`);
   return dest;
