@@ -22,6 +22,11 @@ module.exports = {
   // デバッグ用スクリーンショット/ログの保存先
   ARTIFACTS_DIR: path.join(BASE_DIR, 'artifacts'),
 
+  // 実行ログ・状態ファイルの保存先
+  LOG_DIR: path.join(BASE_DIR, 'logs'),
+  // 「その月に取得済みか」を記録するマーカー（成功した年月 "YYYY-MM" を書き込む）
+  STATE_FILE: path.join(BASE_DIR, 'logs', '.last-success'),
+
   // 開始ページ（Cursorのダッシュボード）
   START_URL: 'https://cursor.com/dashboard',
 

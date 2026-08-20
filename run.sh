@@ -26,7 +26,8 @@ mkdir -p "$PROJECT_DIR/logs"
 LOG="$PROJECT_DIR/logs/run.log"
 
 echo "==== $(date '+%Y-%m-%d %H:%M:%S') start ====" >> "$LOG"
-"$NODE" "$PROJECT_DIR/cli.js" download >> "$LOG" 2>&1
+# scheduled: 毎日起動される前提。開始日(既定20日)以降・今月未取得のときだけDLする。
+"$NODE" "$PROJECT_DIR/cli.js" scheduled >> "$LOG" 2>&1
 NODE_EXIT=$?
 echo "==== $(date '+%Y-%m-%d %H:%M:%S') end (exit=$NODE_EXIT) ====" >> "$LOG"
 exit "$NODE_EXIT"

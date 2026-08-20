@@ -5,7 +5,7 @@ Cursor の **請求書（invoice）** と **領収書（receipt）** の PDF を
 - 対応 OS: **macOS / Windows**
 - 取得元: [cursor.com](https://cursor.com) → Billing → Stripe カスタマーポータル
 - 保存先: 各ユーザーの **Downloads** フォルダ
-- 既定スケジュール: **毎月 20 日 11:00**
+- 既定スケジュール: **毎日 11:00 に起動**し、**毎月 20 日以降でその月をまだ取得していなければ** DL。**成功するまで翌日以降も毎日リトライ**し、成功したらその月は以降スキップします。
 
 会社契約でメール通知が来ない場合でも、ブラウザから手動で取れる領収書を自動化する用途を想定しています。
 
@@ -61,8 +61,9 @@ npm run download:headed
 | コマンド | 説明 |
 |---|---|
 | `npm run login` | Chrome を起動し、手動ログイン後に `auth.json` を保存 |
-| `npm run download` | 請求書・領収書を DL（画面なし・自動実行向け） |
+| `npm run download` | 請求書・領収書を DL（手動・毎回実行） |
 | `npm run download:headed` | 上記と同じだが Chrome を表示（デバッグ用） |
+| `node cli.js scheduled` | 自動実行向け。開始日(既定20日)以降・その月が未取得のときだけ DL |
 | `node cli.js help` | ヘルプ表示 |
 
 ### オプション
@@ -77,7 +78,11 @@ set MAX_INVOICES=3 && npm run download
 
 ---
 
-## 自動実行の登録（毎月 20 日 11:00）
+## 自動実行の登録（毎日 11:00 起動 / 20日以降・未取得の月のみDL）
+
+毎日 11:00 に起動し、`cli.js scheduled` が「今日が開始日（既定 20 日）以降」かつ「その月をまだ取得していない」場合だけ DL します。失敗した日は記録を残さないので、**成功するまで翌日以降も毎日再試行**します。成功すると `logs/.last-success` にその年月を記録し、以降その月は起動してもスキップします。
+
+開始日を変えたい場合は環境変数 `START_DAY`（例: `START_DAY=25`）で調整できます。
 
 ### macOS
 
@@ -107,7 +112,7 @@ rm ~/Library/LaunchAgents/com.cursor-receipts.$(whoami).plist
 ### Windows
 
 1. `schedule-windows.bat` を **右クリック** → **管理者として実行**
-2. タスク名 `CursorReceipts` が毎月 20 日 11:00 に登録されます
+2. タスク名 `CursorReceipts` が毎日 11:00 に登録されます（実際の DL は 20 日以降・未取得の月のみ）
 3. ログ: `logs\run.log`
 
 **今すぐテスト実行**
@@ -126,9 +131,9 @@ schtasks /Run /TN CursorReceipts
 
 ```
 cursor-receipts-downloader/
-├── cli.js              # エントリ（login / download を振り分け）
+├── cli.js              # エントリ（login / download / scheduled を振り分け）
 ├── login.js            # 手動ログイン → auth.json 保存
-├── download.js         # Stripe から PDF DL
+├── download.js         # Stripe から PDF DL（失敗時は自動リトライ）
 ├── browser.js          # Chrome 起動（auth.json 利用）
 ├── chrome-path.js      # OS 別 Chrome パス検出
 ├── config.js           # 保存先・URL など
@@ -142,7 +147,7 @@ cursor-receipts-downloader/
 ├── auth.json           # ★ ログイン後に自動生成（配布しない）
 ├── .chrome-debug/      # ログイン用 Chrome プロファイル（自動生成）
 ├── artifacts/          # 失敗時のスクショ・HTML（デバッグ用）
-└── logs/               # 実行ログ
+└── logs/               # 実行ログ / .last-success（取得済みの月を記録）
 ```
 
 ---
@@ -166,9 +171,13 @@ npm run login
 
 `npm run download:headed` で画面を見ながら再実行し、`artifacts/` 内の `invoice-page.png` を確認してください。Stripe の UI 変更時は `download.js` のボタン文言の調整が必要になることがあります。
 
-### 自動実行されない
+### 自動実行されない / ページ読み込みでタイムアウトする
 
-- **mac**: 20 日に Mac がスリープ・電源 OFF だと当日は実行されないことがあります（起動後に遅延実行される場合あり）
+- **mac**: 20 日に Mac がスリープ・電源 OFF だと当日は実行されないことがあります（起動後に遅延実行される場合あり）。その場合でも **翌日以降 11:00 に毎日再試行**し、成功したらその月は止まります。
+- 1 回の実行の中でも、スリープ復帰直後に回線が繋がる前に起動してページ読み込みがタイムアウトすることがあります。そのため既定で **20 秒間隔・最大 3 回** 自動リトライします。挙動は環境変数で調整できます。
+  - `MAX_ATTEMPTS`（既定 3）: 試行回数
+  - `RETRY_DELAY_MS`（既定 20000）: リトライ間隔(ms)
+  - `NAV_TIMEOUT_MS`（既定 60000）: ダッシュボード読み込み待ちの上限(ms)
 - **Windows**: タスクスケジューラで「ログオンしているときのみ実行」等の条件を確認
 - ログ `logs/run.log` を確認
 

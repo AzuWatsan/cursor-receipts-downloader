@@ -21,8 +21,18 @@ const {
 let MAX_INVOICES = parseInt(process.env.MAX_INVOICES || '1', 10);
 const SLOWMO = parseInt(process.env.SLOWMO || '0', 10);
 
+// 一時的なネットワーク不調（スリープ復帰直後で回線が繋がっていない等）に備えたリトライ設定。
+const MAX_ATTEMPTS = parseInt(process.env.MAX_ATTEMPTS || '3', 10);
+const RETRY_DELAY_MS = parseInt(process.env.RETRY_DELAY_MS || '20000', 10);
+// ダッシュボードの読み込み待ち上限(ms)。復帰直後は描画が遅いので長めに取る。
+const NAV_TIMEOUT_MS = parseInt(process.env.NAV_TIMEOUT_MS || '60000', 10);
+
+// リトライしても解消しない致命的エラー（再試行せず即中断する）。
+const FATAL_CODES = new Set(['NO_SESSION', 'SESSION_EXPIRED']);
+
 const ts = () => new Date().toISOString().replace(/[:.]/g, '-');
 const log = (...a) => console.log(`[${new Date().toISOString()}]`, ...a);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function ensureDir(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -188,28 +198,14 @@ async function downloadOnInvoicePage(page) {
   }
 }
 
-// 領収書/請求書をDLする。成功時は何も投げず、致命的問題は Error を投げる。
-async function runDownload(opts = {}) {
-  const headed = !!opts.headed || process.env.HEADLESS === 'false';
-  if (typeof opts.maxInvoices === 'number' && opts.maxInvoices > 0) {
-    MAX_INVOICES = opts.maxInvoices;
-  }
-
-  ensureDir(ARTIFACTS_DIR);
-  ensureDir(DOWNLOAD_DIR);
-
-  if (!fs.existsSync(AUTH_FILE)) {
-    const err = new Error('セッションが見つかりません。先に login を実行してください。');
-    err.code = 'NO_SESSION';
-    throw err;
-  }
-
+// ブラウザ起動〜DLまでの1回分の試行。ここで投げたエラーは runDownload 側でリトライ判定する。
+async function attemptDownload({ headed }) {
   const { browser, context } = await launchWithAuth({ headless: !headed, slowMo: SLOWMO });
   const page = context.pages()[0] || (await context.newPage());
 
   try {
     log('open dashboard:', START_URL);
-    await page.goto(START_URL, { waitUntil: 'domcontentloaded' });
+    await page.goto(START_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
     await page.waitForTimeout(2500);
     await snap(page, 'dashboard');
 
@@ -232,6 +228,45 @@ async function runDownload(opts = {}) {
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+// 領収書/請求書をDLする。成功時は何も投げず、致命的問題は Error を投げる。
+// 一時的な失敗（スリープ復帰直後のネットワーク不調など）は自動リトライする。
+async function runDownload(opts = {}) {
+  const headed = !!opts.headed || process.env.HEADLESS === 'false';
+  if (typeof opts.maxInvoices === 'number' && opts.maxInvoices > 0) {
+    MAX_INVOICES = opts.maxInvoices;
+  }
+
+  ensureDir(ARTIFACTS_DIR);
+  ensureDir(DOWNLOAD_DIR);
+
+  if (!fs.existsSync(AUTH_FILE)) {
+    const err = new Error('セッションが見つかりません。先に login を実行してください。');
+    err.code = 'NO_SESSION';
+    throw err;
+  }
+
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      log(`試行 ${attempt}/${MAX_ATTEMPTS}`);
+      await attemptDownload({ headed });
+      return;
+    } catch (e) {
+      lastErr = e;
+      // セッション切れ等はリトライしても無駄なので即中断
+      if (FATAL_CODES.has(e.code)) {
+        throw e;
+      }
+      log(`試行 ${attempt} 失敗:`, e.message);
+      if (attempt < MAX_ATTEMPTS) {
+        log(`${Math.round(RETRY_DELAY_MS / 1000)} 秒待って再試行します…`);
+        await sleep(RETRY_DELAY_MS);
+      }
+    }
+  }
+  throw lastErr;
 }
 
 module.exports = { runDownload };
