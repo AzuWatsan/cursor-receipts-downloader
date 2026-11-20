@@ -65,23 +65,23 @@ async function gotoStripePortal(context, page) {
   // すでにStripe上ならそのまま
   if (/stripe\.com/.test(page.url())) return page;
 
+  // Cursor の Billing 画面では「Manage in Stripe」が正。曖昧な "Billing"/"Manage" は後回し。
   const candidates = [
+    'Manage in Stripe',
     'Manage subscription',
     'Manage billing',
     'Manage Billing',
-    'Billing',
-    'Invoices',
     'View invoices',
-    'Manage',
-    '請求',
+    'Invoices',
     '請求情報',
     'お支払い',
+    '請求',
   ];
 
   for (const url of BILLING_URLS) {
     try {
       log(`open billing page: ${url}`);
-      await page.goto(url, { waitUntil: 'domcontentloaded' });
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
       await page.waitForTimeout(2000);
     } catch (e) {
       log('goto failed:', url, e.message);
@@ -96,12 +96,13 @@ async function gotoStripePortal(context, page) {
       if (count > 0) {
         log(`click candidate: "${text}"`);
         const [popup] = await Promise.all([
-          context.waitForEvent('page', { timeout: 8000 }).catch(() => null),
+          context.waitForEvent('page', { timeout: 15000 }).catch(() => null),
           link.first().click().catch(() => null),
         ]);
         const target = popup || page;
         await target.waitForLoadState('domcontentloaded').catch(() => {});
-        await target.waitForTimeout(2500);
+        // Stripe ポータルはシェルだけ先に出て中身が遅れて描画されることがある
+        await target.waitForTimeout(2000);
         if (/stripe\.com/.test(target.url())) {
           log('reached Stripe portal:', target.url());
           return target;
@@ -117,18 +118,28 @@ async function gotoStripePortal(context, page) {
   return page;
 }
 
-// Stripeポータル/請求書ページから invoice / receipt のPDFをDL
+// Stripeポータルの請求一覧が出るまで待つ（シェルだけ先に出て中身が空のことがある）
+async function waitForInvoiceLinks(portal, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const hrefs = await portal
+      .locator('a[href*="invoice.stripe.com"]')
+      .evaluateAll((els) => Array.from(new Set(els.map((e) => e.href))).filter(Boolean))
+      .catch(() => []);
+    if (hrefs.length > 0) return hrefs;
+    await portal.waitForTimeout(1500);
+  }
+  return [];
+}
+
+// Stripeポータル/請求書ページから invoice / receipt のPDFをDL。保存できたパスの配列を返す。
 async function downloadFromStripe(context, portal) {
-  await portal.waitForTimeout(1500);
+  log('waiting for Stripe portal invoice list…');
+  let invoiceHrefs = await waitForInvoiceLinks(portal);
   await snap(portal, 'stripe-portal');
 
-  // Stripeポータルでは各invoiceがリンク or 行クリックで invoice.stripe.com へ遷移する
-  let invoiceHrefs = await portal
-    .locator('a[href*="invoice.stripe.com"]')
-    .evaluateAll((els) => Array.from(new Set(els.map((e) => e.href))).filter(Boolean))
-    .catch(() => []);
-
   log(`found ${invoiceHrefs.length} candidate invoice link(s)`);
+  const saved = [];
 
   if (invoiceHrefs.length === 0) {
     // リンクで取れない場合は、行クリックで詳細へ入る方式を試す
@@ -142,20 +153,21 @@ async function downloadFromStripe(context, portal) {
       ]);
       const detail = popup || portal;
       await detail.waitForLoadState('domcontentloaded').catch(() => {});
-      await downloadOnInvoicePage(detail);
+      saved.push(...(await downloadOnInvoicePage(detail)));
       if (popup) await popup.close().catch(() => {});
     }
-    return;
+    return saved;
   }
 
   const targets = invoiceHrefs.slice(0, MAX_INVOICES);
   for (const href of targets) {
     log(`open invoice page: ${href}`);
     const detail = await context.newPage();
-    await detail.goto(href, { waitUntil: 'load' }).catch((e) => log('open fail', e.message));
-    await downloadOnInvoicePage(detail);
+    await detail.goto(href, { waitUntil: 'load', timeout: NAV_TIMEOUT_MS }).catch((e) => log('open fail', e.message));
+    saved.push(...(await downloadOnInvoicePage(detail)));
     await detail.close().catch(() => {});
   }
+  return saved;
 }
 
 const BTN = {
@@ -163,7 +175,7 @@ const BTN = {
   receipt: /領収書をダウンロード|download receipt/i,
 };
 
-// invoice.stripe.com の請求書ページ上で「請求書PDF」「領収書PDF」をDL
+// invoice.stripe.com の請求書ページ上で「請求書PDF」「領収書PDF」をDL。保存できたパスの配列を返す。
 async function downloadOnInvoicePage(page) {
   // JS描画が重いので、DLボタンが現れるまで待つ
   const anyBtn = page
@@ -179,6 +191,7 @@ async function downloadOnInvoicePage(page) {
   await page.waitForTimeout(500);
   await snap(page, 'invoice-page');
 
+  const saved = [];
   for (const [label, re] of Object.entries(BTN)) {
     const link = page.getByRole('button', { name: re }).or(page.getByRole('link', { name: re }));
     const cnt = await link.count().catch(() => 0);
@@ -191,11 +204,12 @@ async function downloadOnInvoicePage(page) {
         page.waitForEvent('download', { timeout: 20000 }),
         link.first().click(),
       ]);
-      await saveDownload(download, label);
+      saved.push(await saveDownload(download, label));
     } catch (e) {
       log(`"${label}" のDLに失敗:`, e.message);
     }
   }
+  return saved;
 }
 
 // ブラウザ起動〜DLまでの1回分の試行。ここで投げたエラーは runDownload 側でリトライ判定する。
@@ -219,9 +233,22 @@ async function attemptDownload({ headed }) {
     }
 
     const portal = await gotoStripePortal(context, page);
-    await downloadFromStripe(context, portal);
+    if (!/stripe\.com/.test(portal.url())) {
+      const err = new Error('Stripeポータルに到達できませんでした。Billing 画面の「Manage in Stripe」を確認してください。');
+      err.code = 'NO_PORTAL';
+      throw err;
+    }
 
-    log('完了しました。DLされたファイルは', DOWNLOAD_DIR, 'を確認してください。');
+    const saved = await downloadFromStripe(context, portal);
+    if (!saved.length) {
+      const err = new Error(
+        'PDFを1件も取得できませんでした。Stripeポータルの請求一覧が空、またはUI変更の可能性があります。'
+      );
+      err.code = 'NO_DOWNLOADS';
+      throw err;
+    }
+
+    log(`完了しました。${saved.length} 件保存:`, saved.join(', '));
   } catch (e) {
     await snap(page, 'error').catch(() => {});
     throw e;
